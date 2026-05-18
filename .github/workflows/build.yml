@@ -1,10 +1,19 @@
 name: Build NCM Driver
 
+# ⚠️ This workflow is currently EXPERIMENTAL and not auto-triggered.
+#
+# The EWDK ISO has no programmatic direct download URL (Microsoft's portal
+# requires interactive license acceptance), and the regular WDK installer
+# requires VS 2026 which is not yet on windows-2022 runners. WDK NuGet
+# packages exist (10.0.26100.1+) but would require modifying upstream
+# .vcxproj files which we're trying to keep clean for upstream sync.
+#
+# When the windows-2025 / windows-2026 runner image lands with VS 2026 +
+# WDK preinstalled, change the runner image and re-enable on:push.
+#
+# In the meantime: build locally per APPLE_QUIRK_README.md.
+
 on:
-  push:
-    branches: [ apple-quirk, master, main ]
-  pull_request:
-    branches: [ apple-quirk, master, main ]
   workflow_dispatch:
     inputs:
       configuration:
@@ -27,153 +36,54 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # ─── 1. Source ─────────────────────────────────────────────────────────
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
 
-      # ─── 2. Build tools ────────────────────────────────────────────────────
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Show preinstalled SDKs and tooling
+      - name: Probe runner toolchain
         shell: pwsh
         run: |
-          Write-Host "=== Visual Studio Installer info ==="
+          Write-Host "=== Visual Studio ==="
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (Test-Path $vsWhere) { & $vsWhere -latest -format json | Out-String }
-
-          Write-Host "=== Windows SDK installations ==="
+          if (Test-Path $vsWhere) {
+            & $vsWhere -latest -property catalog_productDisplayVersion
+          }
+          Write-Host "=== Windows Kits ==="
           Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^\d+\.\d+' } | Select-Object Name
+          Write-Host "=== WDK probe ==="
+          $wdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Lib" -ErrorAction SilentlyContinue
+          if ($wdk) { $wdk.Name } else { "WDK not present on this runner image" }
 
-          Write-Host "=== WDK detection ==="
-          $wdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\Lib"
-          if (Test-Path $wdkRoot) {
-            Get-ChildItem $wdkRoot -Directory | Select-Object Name
-          } else {
-            Write-Host "WDK Lib folder not present — will install."
+      - name: Build (best-effort)
+        shell: pwsh
+        run: |
+          # Without WDK, this will fail at the host\ project. Logs help us
+          # understand exactly what's missing on the runner image.
+          try {
+            msbuild "$env:SOLUTION_FILE" `
+              /p:Configuration=$env:CONFIGURATION `
+              /p:Platform=$env:PLATFORM `
+              /m /v:minimal /nologo
+          } catch {
+            Write-Warning "Build failed — see APPLE_QUIRK_README.md for local build."
+            exit 1
           }
 
-      # ─── 3. Install WDK ────────────────────────────────────────────────────
-      # The Windows Driver Kit isn't always preinstalled on windows-2022 runners.
-      # We install via the EWDK ISO mounting path which is the cleanest known
-      # method for headless CI. EWDK = "Enterprise WDK" = a self-contained
-      # build environment with no UI installer.
-      - name: Install WDK via EWDK
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # EWDK download URL — this points to the latest 26100 (Windows 11 24H2) release.
-          # If the URL rots, update to the latest from:
-          #   https://learn.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk
-          $ewdkUrl = 'https://go.microsoft.com/fwlink/?linkid=2289980'
-          $isoPath = "$env:RUNNER_TEMP\ewdk.iso"
-
-          Write-Host "Downloading EWDK ISO (multi-GB, can take 5-10 min)…"
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          Invoke-WebRequest -Uri $ewdkUrl -OutFile $isoPath -UseBasicParsing
-          $sw.Stop()
-          Write-Host ("Downloaded {0:N1} MB in {1:N0} s" -f ((Get-Item $isoPath).Length / 1MB), $sw.Elapsed.TotalSeconds)
-
-          Write-Host "Mounting ISO…"
-          $mount = Mount-DiskImage -ImagePath $isoPath -PassThru
-          $driveLetter = ($mount | Get-Volume).DriveLetter
-          Write-Host "Mounted at ${driveLetter}:"
-
-          # Save for later steps
-          "EWDK_DRIVE=${driveLetter}:" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "EWDK_LAUNCH=${driveLetter}:\BuildEnv\SetupBuildEnv.cmd" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      # ─── 4. Build ─────────────────────────────────────────────────────────
-      - name: Build solution
-        shell: cmd
-        run: |
-          call "%EWDK_LAUNCH%"
-          if errorlevel 1 (
-            echo SetupBuildEnv.cmd failed
-            exit /b 1
-          )
-          msbuild "%SOLUTION_FILE%" /p:Configuration=%CONFIGURATION% /p:Platform=%PLATFORM% /m /v:minimal /nologo
-          if errorlevel 1 (
-            echo Build failed
-            exit /b 1
-          )
-
-      # ─── 5. Collect outputs ────────────────────────────────────────────────
-      - name: List build outputs
-        shell: pwsh
-        run: |
-          Write-Host "=== Files produced ==="
-          Get-ChildItem -Recurse -Include *.sys, *.inf, *.cat, *.pdb |
-            Where-Object { $_.FullName -match "x64\\$env:CONFIGURATION" } |
-            Select-Object @{n='Size_KB';e={[math]::Round($_.Length/1KB,1)}}, FullName |
-            Format-Table -AutoSize
-
-      - name: Stage artifacts
-        shell: pwsh
-        run: |
-          $stage = "$env:RUNNER_TEMP\stage"
-          New-Item -ItemType Directory -Path $stage -Force | Out-Null
-
-          # Copy the host driver bits — this is what users install for the Apple fix.
-          Get-ChildItem -Recurse -Include UsbNcmSample.sys, UsbNcmSample.inf, UsbNcmSample.pdb |
-            Where-Object { $_.FullName -match "x64\\$env:CONFIGURATION" } |
-            Copy-Item -Destination $stage -Force
-
-          # Include README and license so the artifact is self-contained.
-          Copy-Item APPLE_QUIRK_README.md $stage\README.md -ErrorAction SilentlyContinue
-          Copy-Item LICENSE $stage\LICENSE -ErrorAction SilentlyContinue
-
-          Write-Host "=== Staged for upload ==="
-          Get-ChildItem $stage | Format-Table Name, Length, LastWriteTime -AutoSize
-
-      - name: Upload UsbNcmSample driver
+      - name: Upload artifacts (if any built)
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: UsbNcmSample-${{ github.sha }}
-          path: ${{ runner.temp }}/stage/
+          path: |
+            x64/**/UsbNcmSample.sys
+            x64/**/UsbNcmSample.inf
+            x64/**/UsbNcmSample.pdb
+            APPLE_QUIRK_README.md
+            LICENSE
           if-no-files-found: error
           retention-days: 30
-
-  # ─── Optional: self-sign for test deployment ────────────────────────────────
-  test-sign:
-    needs: build
-    runs-on: windows-2022
-    if: github.event_name == 'workflow_dispatch'
-
-    steps:
-      - name: Download driver artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: UsbNcmSample-${{ github.sha }}
-          path: stage
-
-      - name: Create self-signed cert and sign the driver
-        shell: pwsh
-        run: |
-          $cert = New-SelfSignedCertificate `
-            -Type CodeSigningCert `
-            -Subject "CN=AppleNCMDevCert-${{ github.sha }}" `
-            -KeyAlgorithm RSA -KeyLength 2048 `
-            -CertStoreLocation Cert:\CurrentUser\My `
-            -NotAfter (Get-Date).AddYears(1)
-
-          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
-                      Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1).FullName
-          Write-Host "Using signtool: $signtool"
-
-          & $signtool sign /v /fd SHA256 /a /s My /n $cert.Subject `
-              "stage\UsbNcmSample.sys"
-
-          # Export cert for users to import into TrustedRoot + TrustedPublisher
-          Export-Certificate -Cert $cert -FilePath stage\dev-cert.cer
-
-      - name: Upload test-signed bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: UsbNcmSample-test-signed-${{ github.sha }}
-          path: stage/
-          retention-days: 7
