@@ -187,9 +187,12 @@ UsbNcmHostDevice::InitializeDevice(
 
     NCM_RETURN_IF_NOT_NT_SUCCESS(RetrieveDataBulkPipes());
 
-    // If we didn't find all the 3 pipes, fail the start.
+    // Apple Quirk: macOS NCM peripherals (VID 0x05AC, e.g. PID 0x1905)
+    // omit the interrupt endpoint entirely. The two bulk endpoints are
+    // mandatory; the interrupt endpoint is optional and we tolerate its
+    // absence (m_ControlInterruptPipe may be nullptr).
     NCM_RETURN_NT_STATUS_IF_FALSE_MSG(
-        m_ControlInterruptPipe && m_DataBulkInPipe && m_DataBulkOutPipe,
+        m_DataBulkInPipe && m_DataBulkOutPipe,
         STATUS_DEVICE_HARDWARE_ERROR,
         "Bad NCM pipes incomplete");
 
@@ -616,8 +619,22 @@ UsbNcmHostDevice::RetrieveInterruptPipe(
     WDF_USB_PIPE_INFORMATION pipeInfo;
     WDF_USB_PIPE_INFORMATION_INIT(&pipeInfo);
 
+    // Apple Quirk: macOS NCM peripherals omit the interrupt endpoint.
+    // Treat zero pipes as "no link-state notifications" rather than a
+    // hard error — the driver can still operate, it just won't receive
+    // NETWORK_CONNECTION / CONNECTION_SPEED_CHANGE notifications.
+    const UCHAR numConfiguredPipes =
+        WdfUsbInterfaceGetNumConfiguredPipes(m_ControlInterface);
+
+    if (numConfiguredPipes == 0)
+    {
+        m_ControlInterruptPipe = nullptr;
+        m_ControlInterruptPipeMaxPacket = 0;
+        return STATUS_SUCCESS;
+    }
+
     NCM_RETURN_NT_STATUS_IF_FALSE_MSG(
-        WdfUsbInterfaceGetNumConfiguredPipes(m_ControlInterface) == 1,
+        numConfiguredPipes == 1,
         STATUS_DEVICE_HARDWARE_ERROR,
         "Bad NCM control interface");
 
@@ -745,7 +762,11 @@ UsbNcmHostDevice::EnterWorkingState(
         NCM_RETURN_IF_NOT_NT_SUCCESS(RetrieveDataBulkPipes());
     }
 
-    NCM_RETURN_IF_NOT_NT_SUCCESS(StartPipe(m_ControlInterruptPipe));
+    // Apple Quirk: interrupt pipe may be absent on macOS NCM peripherals.
+    if (m_ControlInterruptPipe != nullptr)
+    {
+        NCM_RETURN_IF_NOT_NT_SUCCESS(StartPipe(m_ControlInterruptPipe));
+    }
 
     return STATUS_SUCCESS;
 }
@@ -757,7 +778,11 @@ UsbNcmHostDevice::LeaveWorkingState(
     void
 )
 {
-    StopPipe(m_ControlInterruptPipe);
+    // Apple Quirk: interrupt pipe may be absent on macOS NCM peripherals.
+    if (m_ControlInterruptPipe != nullptr)
+    {
+        StopPipe(m_ControlInterruptPipe);
+    }
     return STATUS_SUCCESS;
 }
 
