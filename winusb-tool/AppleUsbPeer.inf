@@ -1,0 +1,60 @@
+; AppleUsbPeer.inf
+;
+; Bind the Apple USB-C peer device (VID_05AC PID_1905) to Microsoft's
+; built-in WinUSB driver, so a user-mode tool can claim all 4 interfaces
+; and exercise both NCM endpoint pairs directly.
+;
+; This INF takes over for the entire composite device — there is no
+; usbccgp split below it. The user-mode tool selects whichever interface
+; it wants via WinUsb_GetAssociatedInterface().
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = USBDevice
+ClassGuid   = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider    = %Provider%
+CatalogFile = AppleUsbPeer.cat
+DriverVer   = 05/18/2026,1.0.0.0
+PnpLockdown = 1
+
+[ClassInstall32]
+AddReg = ClassInstall_AddReg
+
+[ClassInstall_AddReg]
+HKR,,,,%ClassName%
+HKR,,Icon,,-20
+
+[Manufacturer]
+%Provider% = AppleUsbPeer_Mfg,NTamd64
+
+[AppleUsbPeer_Mfg.NTamd64]
+%DeviceDesc% = AppleUsbPeer_Install, USB\VID_05AC&PID_1905
+
+; -----------------------------------------------------------------------------
+; Install — uses WinUSB.
+[AppleUsbPeer_Install.NT]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[AppleUsbPeer_Install.NT.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[AppleUsbPeer_Install.NT.Wdf]
+KmdfService = WINUSB, WinUsb_Install
+
+[WinUsb_Install]
+KmdfLibraryVersion = 1.11
+
+; Expose a stable device interface GUID so the user-mode tool can find
+; the device with SetupDiGetClassDevs.
+[AppleUsbPeer_Install.NT.HW]
+AddReg = AppleUsbPeer_Install_AddReg
+
+[AppleUsbPeer_Install_AddReg]
+HKR,,DeviceInterfaceGUIDs,0x00010000,"{D28DF5AC-27AA-47CA-9714-1EFA71566816}"
+
+[Strings]
+Provider    = "AppleNCM-Local"
+ClassName   = "Apple USB Peer"
+DeviceDesc  = "Apple USB-C Peer (WinUSB)"
