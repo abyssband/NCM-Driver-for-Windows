@@ -114,6 +114,26 @@ private:
         _In_ WDFCONTEXT context
     );
 
+    // Phase A experiment: minimal NCM #2 RX hook.
+    // anpi3 on the Mac side already exists and is wired up; the goal is to
+    // verify our Windows driver can claim interface 3's bulk IN pipe and
+    // count bytes the Mac sends.
+    _IRQL_requires_max_(DISPATCH_LEVEL)
+    static
+    VOID
+    DataBulkInPipe2ReadCompletetionRoutine(
+        _In_ WDFUSBPIPE pipe,
+        _In_ WDFMEMORY memory,
+        _In_ size_t numBytesTransfered,
+        _In_ WDFCONTEXT context
+    );
+
+    PAGED
+    NTSTATUS
+    RetrieveDataBulkPipes2(
+        void
+    );
+
     _IRQL_requires_max_(DISPATCH_LEVEL)
     static
     VOID
@@ -196,6 +216,16 @@ private:
 
     WDFUSBPIPE
         m_DataBulkOutPipe = nullptr;
+
+    // Phase A: NCM #2 (interface 3) — corresponds to Mac's anpi* interface.
+    WDFUSBINTERFACE
+        m_DataInterface2 = nullptr;
+
+    WDFUSBPIPE
+        m_DataBulkInPipe2 = nullptr;
+
+    WDFUSBPIPE
+        m_DataBulkOutPipe2 = nullptr;
 
     ULONG
         m_ControlInterruptPipeMaxPacket = 0;

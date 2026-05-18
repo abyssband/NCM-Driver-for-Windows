@@ -250,3 +250,9 @@ paket-files/
 # JetBrains Rider
 .idea/
 *.sln.iml
+
+# winusb-tool build outputs (rebuildable from sources)
+winusb-tool/peer_probe.exe
+winusb-tool/file_recv.exe
+winusb-tool/*.obj
+winusb-tool/appleusbpeer.cat
